@@ -1,0 +1,17 @@
+{
+  "name": "jil-sweet16",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Partyplaner für Jils Sweet 16 – Cloudflare Worker + D1",
+  "scripts": {
+    "dev": "wrangler d1 migrations apply jil-sweet16 --local && wrangler dev",
+    "db:create": "wrangler d1 create jil-sweet16",
+    "db:migrate": "wrangler d1 migrations apply jil-sweet16 --remote",
+    "password": "wrangler secret put EDIT_KEY",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.20.0"
+  }
+}
