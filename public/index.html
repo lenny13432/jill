@@ -579,7 +579,7 @@ function bind(sel,key){
 }
 function adder(form,input,key,make){$(form).addEventListener('submit',e=>{e.preventDefault();const v=$(input).value.trim();if(!v)return;L(key).push(make(v));$(input).value='';save(key);renderSec(key)})}
 const people=()=>['',...L('guests').filter(g=>g.s!=='nein').map(g=>g.n)];
-const whoSel=t=>`<select data-f="who" aria-label="Zuständig">${[...new Set([...people(),'Jil','Eltern',t.who])].map(n=>`<option value="${esc(n)}" ${n===t.who?'selected':''}>${n?esc(n):'Wer?'}</option>`).join('')}</select>`;
+const whoSel=t=>`<select data-f="who" aria-label="Zuständig">${[...new Set([...people(),'Lenn','Larissa',t.who])].map(n=>`<option value="${esc(n)}" ${n===t.who?'selected':''}>${n?esc(n):'Wer?'}</option>`).join('')}</select>`;
 const doneCount=k=>`<span><b>${L(k).filter(t=>t.done).length}</b>/${L(k).length} erledigt</span>`;
 
 const R={
