@@ -39,9 +39,14 @@ Die Ausgabe zeigt eine `database_id`. Diese ID in `wrangler.toml` bei `database_
 
 ### 3. Tabellen anlegen
 
+Passiert automatisch beim ersten Aufruf der Seite. Optional per Hand:
+
 ```bash
 npm run db:migrate
 ```
+
+**Prüfen, ob alles verbunden ist:** `https://DEINE-ADRESSE/api/health` öffnen.
+`"database": true` heißt: alles gut. Sonst steht dort, was fehlt.
 
 ### 4. Party-Passwort festlegen
 

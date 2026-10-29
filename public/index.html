@@ -213,6 +213,14 @@ section.card{background:linear-gradient(180deg,var(--panel2),var(--panel));borde
 .foot{margin-top:28px;text-align:center;color:var(--muted);font-size:13px}
 #fx{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:70}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+/* STATUS */
+.sync.saving i{background:var(--orange);animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.3}}
+.errbar,.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom,0px));z-index:75;width:min(560px,calc(100% - 32px));border-radius:16px;padding:12px 12px 12px 16px;font-weight:600;font-size:14px;box-shadow:0 18px 40px -12px #000}
+.errbar{display:flex;align-items:center;gap:12px;justify-content:space-between;background:#3a0f24;border:1px solid var(--pink);color:#ffd6ea}
+.errbar button{padding:8px 14px;flex:0 0 auto}
+.toast{background:#123a2e;border:1px solid var(--mint);color:#c9ffe9;text-align:center;width:auto;padding:10px 18px}
+@media (max-width:760px){.errbar,.toast{bottom:calc(86px + env(safe-area-inset-bottom,0px))}}
 /* LOGIN */
 .login{position:fixed;inset:0;z-index:80;display:grid;place-items:center;background:#07040ef2;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .login form{width:min(380px,100%);display:grid;gap:14px;text-align:center;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:22px;padding:28px 22px}
@@ -233,6 +241,8 @@ section.card{background:linear-gradient(180deg,var(--panel2),var(--panel));borde
     <button type="button" class="icon" id="loginSkip">Ohne Anmeldung nur auf diesem Gerät nutzen</button>
   </form>
 </div>
+<div class="errbar" id="errbar" hidden role="alert"><span id="errTxt"></span><button class="btn" id="errRetry">Nochmal</button></div>
+<div class="toast" id="toast" hidden role="status"></div>
 <canvas id="fx" aria-hidden="true"></canvas>
 <nav class="nav" aria-label="Seiten"><div class="in"><a class="brand" href="#start">Jil 16</a><div class="links" id="links"></div><span class="navcount" id="navcount"></span><span class="sync" id="sync" title="Speicherort"><i></i><span>Lokal</span></span></div></nav>
 <nav class="bnav" id="bnav" aria-label="Seiten"></nav>
@@ -398,76 +408,118 @@ SECS.forEach(s=>D[s]=local[s]||DEFAULTS[s]());
 const L=k=>D[k].items;
 
 /* ---------- STORAGE: local cache + Cloudflare D1 via /api ---------- */
-let skipped=false, online=false, dirty=new Set(), timers={}, deferred={}, known={};
+let skipped=false, online=false, failed=false, pending=new Set(), timers={}, deferred={}, known={}, changedAt={};
 let partyKey='';try{partyKey=localStorage.getItem(KEY+'-key')||''}catch(e){}
-function cacheLocal(){try{localStorage.setItem(KEY,JSON.stringify(D))}catch(e){}}
+function cacheLocal(){
+  try{localStorage.setItem(KEY,JSON.stringify(D))}
+  catch(e){ /* Handy-Speicher zu klein für Fotos: ohne lokale Fotos sichern */
+    try{const lite=JSON.parse(JSON.stringify(D));if((lite.loc.img||'').startsWith('data:'))lite.loc.img='';lite.mood.items=lite.mood.items.filter(m=>!(m.img||'').startsWith('data:'));localStorage.setItem(KEY,JSON.stringify(lite))}catch(_){}}
+}
+class ApiError extends Error{constructor(status,msg){super(msg);this.status=status}}
 async function api(path,opts={}){
-  const r=await fetch('/api'+path,{...opts,headers:{...(opts.headers||{}),'x-party-key':partyKey}});
-  if(r.status===401){online=false;setSync('lock');showLogin(true);throw new Error('auth')}
-  if(!r.ok)throw new Error('http '+r.status);
-  return r.json();
+  let r;
+  try{r=await fetch('/api'+path,{...opts,cache:'no-store',headers:{...(opts.headers||{}),'x-party-key':partyKey}})}
+  catch(e){throw new ApiError(0,'Keine Internetverbindung')}
+  let body={};try{body=await r.json()}catch(e){}
+  if(r.status===401){online=false;setSync('lock');showLogin(true);throw new ApiError(401,'Falsches Passwort')}
+  if(!r.ok)throw new ApiError(r.status,body.error||('Serverfehler '+r.status));
+  return body;
 }
 function save(sec){
-  cacheLocal();
+  changedAt[sec]=Date.now();cacheLocal();
   if(!online)return;
-  dirty.add(sec);clearTimeout(timers[sec]);
-  timers[sec]=setTimeout(async()=>{
-    try{const r=await api('/state/'+sec,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(D[sec])});known[sec]=r.v;setSync('live')}
-    catch(e){if(e.message!=='auth')setSync('err')}
-    finally{dirty.delete(sec)}
-  },500);
+  pending.add(sec);setSync('saving');
+  clearTimeout(timers[sec]);timers[sec]=setTimeout(()=>flush(sec),400);
 }
+async function flush(sec,keepalive=false){
+  clearTimeout(timers[sec]);delete timers[sec];
+  const stamp=changedAt[sec];
+  try{
+    const r=await api('/state/'+sec,{method:'PUT',keepalive,headers:{'content-type':'application/json'},body:JSON.stringify(D[sec])});
+    known[sec]=r.v;
+    if(changedAt[sec]===stamp)pending.delete(sec);
+    if(!pending.size){failed=false;setSync('live');showError('')}
+  }catch(e){
+    if(e.status===401)return;
+    failed=true;setSync('err');showError('Nicht gespeichert: '+e.message);
+  }
+}
+/* Beim Wegwischen / App-Wechsel sofort speichern */
+function flushAll(){if(online)[...pending].forEach(s=>flush(s,true))}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)flushAll();else if(online)pull(false).catch(()=>{})});
+addEventListener('pagehide',flushAll);
+
 function setSync(st){
   const el=$('#sync'),t=el.querySelector('span');
-  el.classList.toggle('live',st==='live');
-  t.textContent={live:'Online',err:'Offline',lock:'Gesperrt'}[st]||'Lokal';
-  $('#footTxt').textContent=st==='live'?'Alles wird online in der Datenbank gespeichert und ist auf jedem Gerät gleich, auch die Fotos.':st==='err'?'Keine Verbindung. Änderungen bleiben auf diesem Gerät, bis du wieder online bist.':'Alles wird auf diesem Gerät gespeichert.';
+  el.classList.toggle('live',st==='live');el.classList.toggle('saving',st==='saving');
+  t.textContent={live:'Gespeichert',saving:'Speichert …',err:'Fehler',lock:'Gesperrt',local:'Nur lokal'}[st]||'Lokal';
+  $('#footTxt').textContent=st==='live'||st==='saving'?'Alles wird online in der Datenbank gespeichert und ist auf jedem Gerät gleich, auch die Fotos.':st==='local'?'Keine Verbindung zur Datenbank. Gespeichert wird gerade nur auf diesem Gerät.':'Es gibt ein Problem beim Speichern.';
 }
+function showError(msg){$('#errbar').hidden=!msg;$('#errTxt').textContent=msg}
+function toast(msg){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>t.hidden=true,2200)}
+
 const imgSrc=v=>!v?'':v.startsWith('img:')?'/api/images/'+v.slice(4):v.startsWith('data:')?v:'';
 function dataUrlToBlob(u){const [h,b]=u.split(',');const bin=atob(b);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new Blob([a],{type:h.split(':')[1].split(';')[0]})}
 async function toStored(dataUrl){
+  if(!dataUrl)return '';
   if(!online)return dataUrl;
-  try{const r=await api('/images',{method:'POST',headers:{'content-type':'image/jpeg'},body:dataUrlToBlob(dataUrl)});return 'img:'+r.id}
-  catch(e){return dataUrl}
+  try{const r=await api('/images',{method:'POST',headers:{'content-type':'image/jpeg'},body:dataUrlToBlob(dataUrl)});toast('Foto gespeichert');return 'img:'+r.id}
+  catch(e){showError('Foto nicht gespeichert: '+e.message);return ''}
 }
 function dropImage(v){if(online&&v&&v.startsWith('img:'))api('/images/'+v.slice(4),{method:'DELETE'}).catch(()=>{})}
-function resize(file,max){return new Promise(res=>{const r=new FileReader();r.onload=()=>{const im=new Image();im.onload=()=>{const k=Math.min(1,max/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*k);c.height=Math.round(im.height*k);c.getContext('2d').drawImage(im,0,0,c.width,c.height);res(c.toDataURL('image/jpeg',.85))};im.onerror=()=>res('');im.src=r.result};r.readAsDataURL(file)})}
-function editingIn(sec){const a=document.activeElement,pg=document.querySelector(`[data-page="${PAGE_OF[sec]}"]`);return a&&pg&&pg.contains(a)&&/INPUT|TEXTAREA|SELECT/.test(a.tagName)&&a.type!=='checkbox'}
-function applyRemote(sec,data){if(dirty.has(sec))return;if(editingIn(sec)){deferred[sec]=data;return}D[sec]=data;cacheLocal();renderSec(sec)}
+function resize(file,max){return new Promise(res=>{
+  const done=c=>res(c.toDataURL('image/jpeg',.82));
+  const draw=(src,w,h)=>{const k=Math.min(1,max/Math.max(w,h)),c=document.createElement('canvas');c.width=Math.round(w*k);c.height=Math.round(h*k);c.getContext('2d').drawImage(src,0,0,c.width,c.height);done(c)};
+  /* createImageBitmap dreht Handy-Fotos richtig und spart Speicher */
+  if(window.createImageBitmap){createImageBitmap(file,{imageOrientation:'from-image'}).then(b=>draw(b,b.width,b.height)).catch(fallback)}else fallback();
+  function fallback(){const url=URL.createObjectURL(file);const im=new Image();im.onload=()=>{draw(im,im.naturalWidth,im.naturalHeight);URL.revokeObjectURL(url)};im.onerror=()=>{showError('Dieses Bildformat geht nicht. Bitte JPG oder PNG nehmen.');res('')};im.src=url}
+})}
+function editingIn(sec){const a=document.activeElement,pg=document.querySelector(`[data-page="${PAGE_OF[sec]}"]`);return a&&pg&&pg.contains(a)&&/INPUT|TEXTAREA|SELECT/.test(a.tagName)&&!['checkbox','file'].includes(a.type)}
+function applyRemote(sec,data){if(pending.has(sec))return;if(editingIn(sec)){deferred[sec]=data;return}D[sec]=data;cacheLocal();renderSec(sec)}
 document.addEventListener('focusout',()=>setTimeout(()=>{Object.keys(deferred).forEach(s=>{if(!editingIn(s)){const d=deferred[s];delete deferred[s];applyRemote(s,d)}})},50));
 
 async function uploadLocalImages(sec,v){
-  if(sec==='loc'&&v.img&&v.img.startsWith('data:'))v.img=await toStored(v.img);
-  if(sec==='mood')for(const m of v.items)if(m.img&&m.img.startsWith('data:'))m.img=await toStored(m.img);
+  if(sec==='loc'&&(v.img||'').startsWith('data:'))v.img=await toStored(v.img);
+  if(sec==='mood'){for(const m of v.items)if((m.img||'').startsWith('data:'))m.img=await toStored(m.img);v.items=v.items.filter(m=>m.img)}
   return v;
 }
 async function pull(first){
+  const started=Date.now();
   const {sections}=await api('/state');
   for(const sec of SECS){
+    /* nichts überschreiben, was auf diesem Gerät gerade geändert wurde */
+    if(pending.has(sec)||(changedAt[sec]||0)>started-500)continue;
     const s=sections[sec];
     if(s){if(s.v!==known[sec]){known[sec]=s.v;applyRemote(sec,s.data)}}
-    else if(first){ /* Datenbank ist für diesen Bereich noch leer: Stand dieses Geräts hochladen */
+    else if(first){ /* Bereich ist in der Datenbank noch leer: Stand dieses Geräts hochladen */
       D[sec]=await uploadLocalImages(sec,JSON.parse(JSON.stringify(D[sec])));renderSec(sec);save(sec);
     }
   }
 }
 async function connect(){
-  try{await pull(true);online=true;setSync('live');showLogin(false)}
-  catch(e){if(e.message!=='auth')setSync('local');return}
+  online=true;
+  try{await pull(true);setSync(pending.size?'saving':'live');showLogin(false);showError('')}
+  catch(e){
+    online=false;
+    if(e.status===401)return;
+    if(e.status===0||e.status===404){setSync('local');return}
+    setSync('err');showError('Datenbank-Problem: '+e.message);
+  }
 }
 setInterval(async()=>{
   if(document.hidden)return;
   if(!online){if(!skipped&&$('#login').hidden)connect();return}
-  try{await pull(false);setSync('live')}catch(e){if(e.message!=='auth')setSync('err')}
+  if(failed)[...pending].forEach(s=>{if(!timers[s])flush(s)});
+  try{await pull(false);if(!pending.size&&!failed)setSync('live')}catch(e){if(e.status!==401){setSync('err');showError('Keine Verbindung zur Datenbank: '+e.message)}}
 },5000);
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&online)pull(false).catch(()=>{})});
+$('#errRetry').addEventListener('click',()=>{showError('');online?[...pending].forEach(s=>flush(s)):connect()});
 
 /* Login */
 function showLogin(on){$('#login').hidden=!on;if(on)setTimeout(()=>$('#pw').focus(),50)}
 $('#loginForm').addEventListener('submit',async e=>{
   e.preventDefault();partyKey=$('#pw').value.trim();try{localStorage.setItem(KEY+'-key',partyKey)}catch(_){}
   $('#loginErr').hidden=true;
-  try{await api('/auth');showLogin(false);await connect()}catch(err){$('#loginErr').hidden=false}
+  try{await api('/auth');showLogin(false);await connect()}catch(err){$('#loginErr').textContent=err.status===401?'Falsches Passwort. Versuch es nochmal.':err.message;$('#loginErr').hidden=false}
 });
 $('#loginSkip').addEventListener('click',()=>{skipped=true;showLogin(false);setSync('local')});
 
@@ -501,18 +553,25 @@ function renderLoc(){
   pic.style.backgroundImage=src?`url("${src}")`:'';pic.classList.toggle('empty',!src);$('#locph').hidden=!!src;$('#uplTxt').textContent=src?'Foto ändern':'Foto hochladen';
   const q=D.loc.address||D.loc.name;$('#map').href=q?'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q):'https://www.google.com/maps';
 }
-document.querySelectorAll('.locbody [data-k]').forEach(el=>el.addEventListener('input',()=>{D.loc[el.dataset.k]=el.value;save('loc');const q=D.loc.address||D.loc.name;$('#map').href=q?'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q):'https://www.google.com/maps';invite()}));
+document.querySelectorAll('.locbody [data-k]').forEach(el=>['input','change'].forEach(ev=>el.addEventListener(ev,()=>{if(D.loc[el.dataset.k]===el.value)return;D.loc[el.dataset.k]=el.value;save('loc');const q=D.loc.address||D.loc.name;$('#map').href=q?'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q):'https://www.google.com/maps';invite()})));
 $('#locImg').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;const pic=$('#locpic');pic.insertAdjacentHTML('beforeend','<div class="busy">Lädt hoch …</div>');
-  const d=await resize(f,1600);const v=await toStored(d);if(v)dropImage(D.loc.img);pic.querySelector('.busy')?.remove();if(!v)return;D.loc.img=v;save('loc');renderLoc();e.target.value=''});
+  const d=await resize(f,1600);const v=await toStored(d);pic.querySelector('.busy')?.remove();e.target.value='';if(!v)return;dropImage(D.loc.img);D.loc.img=v;save('loc');renderLoc()});
 $('#locpic').addEventListener('click',e=>{if(e.target.closest('.upl')||!D.loc.img)return;openLb([imgSrc(D.loc.img)],0)});
 
 /* ---------- LIST HELPERS ---------- */
 const X='<button class="icon" data-act="del" aria-label="Löschen">✕</button>';
 function bind(sel,key){
-  $(sel).addEventListener('input',e=>{const f=e.target.dataset.f;if(!f)return;const item=L(key).find(x=>x.id===e.target.closest('[data-id]').dataset.id);if(!item)return;
-    item[f]=e.target.type==='checkbox'?e.target.checked:e.target.type==='number'?(+e.target.value||0):e.target.value;save(key);
-    if(e.target.type==='checkbox'){renderSec(key);if(item.done){const r=e.target.getBoundingClientRect();burst(r.left+12,r.top+12,28)}}
-    else if(e.target.tagName==='SELECT')renderSec(key);else if(key==='costs')budget();});
+  const upd=(e,isChange)=>{const el=e.target,f=el.dataset.f;if(!f)return;
+    const viaChange=el.type==='checkbox'||el.tagName==='SELECT'||el.type==='time';
+    if(viaChange!==isChange&&!(el.type==='time'&&!isChange))return;
+    const item=L(key).find(x=>x.id===el.closest('[data-id]').dataset.id);if(!item)return;
+    const val=el.type==='checkbox'?el.checked:el.type==='number'?(+el.value||0):el.value;
+    if(item[f]===val)return;
+    item[f]=val;save(key);
+    if(el.type==='checkbox'){renderSec(key);if(item.done){const r=el.getBoundingClientRect();burst(r.left+12,r.top+12,28)}}
+    else if(el.tagName==='SELECT'||(el.type==='time'&&isChange))renderSec(key);else if(key==='costs')budget();};
+  $(sel).addEventListener('input',e=>upd(e,false));
+  $(sel).addEventListener('change',e=>upd(e,true));
   $(sel).addEventListener('click',e=>{const a=e.target.dataset.act;if(!a)return;const id=e.target.closest('[data-id]').dataset.id;
     if(a==='del')D[key].items=L(key).filter(x=>x.id!==id);
     if(a==='st'){const g=L(key).find(x=>x.id===id);g.s={offen:'ja',ja:'nein',nein:'offen'}[g.s];if(g.s==='ja'){const r=e.target.getBoundingClientRect();burst(r.left+r.width/2,r.top,22)}}
@@ -562,11 +621,10 @@ adder('#eqForm','#eqIn','gear',v=>it(v,{who:'',done:false}));
 adder('#cForm','#cIn','costs',v=>it(v,{v:0}));
 adder('#aForm','#aIn','tl',v=>it(v,{at:''}));
 adder('#pForm','#pIn','songs',v=>it(v));
-$('#tl').addEventListener('change',e=>{if(e.target.type==='time')R.tl()});
 $('#bMax').addEventListener('input',e=>{D.meta.budgetMax=+e.target.value||0;save('meta');budget()});
 $('#mottos').addEventListener('click',e=>{const m=e.target.dataset.m;if(!m)return;D.meta.motto=D.meta.motto===m?'':m;save('meta');R.meta()});
 $('#mottoTxt').addEventListener('input',e=>{D.meta.mottoTxt=e.target.value;save('meta');invite()});
-['c1','c2','c3'].forEach((c,i)=>$('#'+c).addEventListener('input',e=>{D.meta.colors[i]=e.target.value;save('meta')}));
+['c1','c2','c3'].forEach((c,i)=>['input','change'].forEach(ev=>$('#'+c).addEventListener(ev,e=>{if(D.meta.colors[i]===e.target.value)return;D.meta.colors[i]=e.target.value;save('meta')})));
 $('#mood').addEventListener('click',e=>{
   const del=e.target.dataset.del;if(del){dropImage(L('mood').find(m=>m.id===del)?.img);D.mood.items=L('mood').filter(m=>m.id!==del);save('mood');R.mood();return}
   const f=e.target.closest('figure');if(f)openLb(L('mood').map(m=>imgSrc(m.img)),+f.dataset.i)});
