@@ -1,8 +1,7 @@
-name = "jil-sweet16"
+name = "jill"
 main = "src/worker.js"
 compatibility_date = "2025-06-01"
 
-# Die Website (public/) wird direkt ausgeliefert, /api/* geht an den Worker
 [assets]
 directory = "./public"
 binding = "ASSETS"
@@ -10,6 +9,5 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "jil-sweet16"
-# Nach "npx wrangler d1 create jil-sweet16" hier die angezeigte ID eintragen:
-database_id = "HIER-DEINE-DATABASE-ID-EINTRAGEN"
+database_id = "a1416a27-6220-4df8-911e-5f4a71c4866f"
 migrations_dir = "migrations"
